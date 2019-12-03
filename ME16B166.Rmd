@@ -1,0 +1,334 @@
+---
+title: "ME16B166_ATSA_Project"
+author: "Sureddy Abhishek"
+date: "27 November 2019"
+output:
+  pdf_document: default
+  word_document: default
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## 1. Reading the data
+
+```{r}
+Data = read.csv('SHAR_MAY15_JULY7.csv')
+# finding the number of columns
+n_cols = ncol(Data)
+# Removing the first 4 columns, the modified data is :
+mod_Data = Data[,5:n_cols]
+# Resulting Data is as follows :
+head(mod_Data,3)
+```
+
+## 2. Missing value location
+### Approach :
+Using a unique encoding for a particular hour for each day, and creating a sequence of such values,from starting row to ending row, I'm going to locate the missing values by outer_join.
+```{r}
+# Encoding column, formed by combining date and time
+mod_Data$Enc = paste(mod_Data$DATE.GMT., mod_Data$TIME.GMT., sep =" ")
+# using as.Date() function, doesn't work here, because 
+# the Date format is not in standard format, in all rows
+# so, we get this error :
+# Error in charToDate(x) : 
+#  character string is not in a standard unambiguous format
+# Hence we use alternate way
+
+mod_Data$Enc = as.POSIXct(mod_Data$Enc, '%m/%d/%Y %H', tz = "GMT")
+# checking how the created column looks like
+head(mod_Data$Enc, 3)
+```
+
+```{r}
+start_index = 1
+end_index = nrow(mod_Data)
+Enc = seq(mod_Data$Enc[start_index], mod_Data$Enc[end_index], by = 'hour')
+Enc = as.POSIXct(Enc, '%m/%d/%Y %H', tz = "GMT")
+# making Enc column to a data frame
+df = data.frame(Enc = Enc)
+# outer-joining the df and mod_Data on Enc column
+fin_Data = merge(df, mod_Data, by.x = 'Enc', by.y = 'Enc', all.x = TRUE)
+# Dropping the TIME.GMT., DATE.GMT, TIME.IST, 
+# DATE.IST columns, (as we don't use them further)
+fin_Data_1 = subset(fin_Data, select = -c(TIME.GMT.,DATE.GMT.,TIME.IST.,DATE.IST.))
+# looking few rows of the data frame created
+head(fin_Data_1,3)
+```
+
+In the final Data frame created `fin_Data_1`, the missing values are represented by `NA`, by default.
+```{r}
+# suppressing warnings
+options(warn = -1)
+# ploting the variables with missing data
+layout(matrix(c(1,2,3,4,5,5,6,7,8), nrow = 3, ncol = 3, byrow = TRUE))
+plot(fin_Data_1[,2], type = 'l', main = "Air temperature", ylab = "")
+plot(fin_Data_1$WIND_SPEED.m.s., type = 'l', main = "Wind speed", ylab = "")
+plot(fin_Data_1$WIND_DIRECTION.deg., type = 'l', main = "wind direction", ylab = "")
+plot(fin_Data_1$ATMO_PRESSURE.hpa., type = 'l', main = "Atmospheric pressure", ylab = "")
+plot(fin_Data_1$HUMIDITY..., type = 'l', main = "Humidity", ylab = "")
+plot(fin_Data_1$RAIN_FALL.mm., type = 'l', main = "Rainfall", ylab = "")
+plot(fin_Data_1$SUN_SHINE.hh.mm., type = 'l', main = "Sun shine", ylab = "")
+plot(fin_Data_1$BATTERY_VOLTAGE.V., type = 'l', main = "Battery voltage", ylab = "")
+
+```
+
+## 3. Imputation
+### 3.1. using mice
+
+```{r, message=FALSE, error = FALSE, warning = FALSE, results = 'hide'}
+library(mice, warn.conflicts=F, quietly=T)
+# excluding sunshine (since it is a time variable, mice can't handle it)
+Imp_op = mice(data = fin_Data_1[,c(2,3,4,5,6,7,9)], method = 'norm.predict', m = 2, verbose = FALSE)
+data_imputed = complete(Imp_op)
+# creating a mode function for categorical variables
+Mode <- function (x, na.rm) {
+    xtab <- table(x)
+    xmode <- names(which(xtab == max(xtab)))
+    if (length(xmode) > 1)
+        xmode <- ">1 mode"
+    return(xmode)
+}
+# imputing the sunshine variable
+data_imputed$SunShine = fin_Data_1$SUN_SHINE.hh.mm.
+data_imputed$SunShine[is.na(data_imputed$SunShine)] = Mode(data_imputed$SunShine, na.rm = TRUE)
+# attaching the encoding column
+Imputed_data = cbind(Enc, data_imputed)
+```
+### splitting into train and test data
+```{r}
+# 1200 train data & 96 test data
+# train data
+train_data = Imputed_data[1:1200,]
+# test data
+test_data = Imputed_data[1201:1296,]
+```
+## 4. Creating ts objects of RH and temperature variables
+RH and temperature are converted to time-series objects using `ts` attribute
+```{r}
+# train data
+Air_temp = ts(train_data[,2])
+RH = ts(train_data$HUMIDITY...)
+# test data
+Air_temp_test = ts(test_data[,2])
+RH_test = ts(test_data$HUMIDITY...)
+```
+## 5. Fuzzy time series model ($M_1$)
+Here we build a FTS model using AnalyzeTS package and to model it, we use `fuzzy.ts1` function. We use `Chen` method.
+```{r, fig.width= 6, fig.height= 3, fig.align="center"}
+library(AnalyzeTS, warn.conflicts=F, quietly=T)
+options(warn = -1)
+#fuzzy1 = fuzzy.ts1(ts(Imputed_data$HUMIDITY...),n = 10,D1 = 10,D2 = 10,type = "Chen",trace = 1)
+fuzzy1 = fuzzy.ts2(RH,n=11,w=5,C=0.01,D1=2,D2=1,forecast=96,type="Abbasov-Mamedova",trace = TRUE)
+
+pred_train = fuzzy1$table4$interpolate[1:1200]
+plot(ts(pred_train),type = 'l', main = 'Prediction on Train Data(M1)',ylab = 'RH')
+lines(RH, col = 'red')
+
+forecast_M1 = fuzzy1$table5$forecast
+plot(ts(forecast_M1),type = 'l', ylim = c(10, 90), main = 'Forecast on Test Data(M1)', ylab = 'RH')
+lines(RH_test, col = 'red')
+
+# reporting accuracies
+print("The train accuracy metrics for M1 are :")
+print(fuzzy1$accuracy)
+library(DMwR, warn.conflicts=F, quietly=T)
+test_eval = regr.eval(RH_test, forecast_M1)
+print("The test accuracy metrics for M1 are :")
+print(test_eval)
+```
+From the above plots, we infer that, the fuzzy time series is non-linear modelling process, it didn't perform well on test data.
+The black lines are predicted values, the red lines are actual values after imputing.
+
+## 6. Linear SARIMA model (model $M_2$)
+```{r, fig.width = 6, fig.height = 3, fig.align = 'center'}
+library(TSA, warn.conflicts=F, quietly=T)
+# ploting the series
+
+plot(RH, main = 'Relative Humidity vs Time')
+# ACF of the Relative humidity series
+acf(RH, lag.max = 100, main = 'ACF of RH Series')
+# PACf of the Relative humidity series
+pacf(RH, lag.max = 100, main = 'PACF of RH series')
+```
+```{r checking for trend stationarity of RH series}
+library(tseries, warn.conflicts=F, quietly=T)
+kpss.test(RH)
+adf.test(RH)
+```
+
+From the ACF of the data, we see that the data has periodic component.
+  From the KPSS test and ADF test, we conclude that the `RH` series doesn't have trend.(i.e. determininstic periodic component is not present).
+  So we confirm this by it's periodogram to check if it is a deterministic component or seasonality. It is a non-zero mean process.
+
+```{r, fig.width = 6, fig.height = 3, fig.align = 'center'}
+# Periodogram of RH series
+periodogram(RH, main = "Periodogram")
+
+```
+From the periodogram, we conclude that, the data has a seasonal component with period `24`, we should build a multiplicative model.
+
+```{r, fig.height = 3, fig.align = 'center'}
+# plotting the air temperature plots
+plot(Air_temp, main = "Air temp Vs time")
+# ACF
+acf(Air_temp, main = "ACF of air temp", lag.max = 100)
+# PACF
+pacf(Air_temp, main = "PACF of air temp", lag.max = 100)
+# periodogram
+periodogram(Air_temp, main = "Periodogram of air temp series")
+
+```
+```{r checking for trend stationarity of Air_temp series}
+library(tseries, warn.conflicts=F, quietly=T)
+kpss.test(Air_temp)
+adf.test(Air_temp)
+```
+
+From the ACF of the data, we see that the data has periodic component.
+  From the KPSS test and ADF test, we conclude that the `Air_temp` series doesn't have trend.(i.e. determininstic periodic component is not present) at 10 % significance.
+  It was confirmed by it's periodogram. From the periodogram, we conclude that, the data has a seasonal component with period `24`, we should build a multiplicative model.
+  Both the series (air temperature and Relative humidity) are not white, so pre-whitening of atleast one of the series should be done.(Here, I'm whitening both series)
+```{r whitening of both series, fig.height = 3, fig.align = 'center'}
+# whitenning using high order AR and seasonal AR model
+library(forecast, warn.conflicts=F, quietly=T)
+library(stats, warn.conflicts=F, quietly=T)
+high_ar = Arima(Air_temp, order = c(5,0,0), seasonal = 
+                  list(order = c(5,0,0), period = 24), method = "CSS")
+# residual analysis
+wk_RH = high_ar$residuals
+plot(wk_RH,main = "pre-whitened air temp series")
+# ACF
+acf(wk_RH, main = "ACF of whitened air temp series", lag.max = 100)
+# PACF
+pacf(wk_RH, main = "PACF of whitened air temp series", lag.max = 100)
+
+high_ar2 = Arima(Air_temp, order = c(5,0,0), seasonal = 
+                   list(order = c(5,0,0), period = 24), method = "CSS")
+# residual analysis
+wk_air = high_ar$residuals
+plot(wk_air,main = "pre-whitened air temp series")
+# ACF
+acf(wk_air, main = "ACF of whitened air temp series", lag.max = 100)
+# PACF
+pacf(wk_air, main = "PACF of whitened air temp series", lag.max = 100)
+
+```
+```{r CCF between pre-whitenned air-temp and RH, fig.height = 3, fig.align = 'center'}
+ccf(wk_RH, wk_air, lag.max = 50, type = 'correlation')
+```
+From the CCF, the highest peak is found at $lag = 0$ and other values seems to be insignificant.
+```{r}
+# Assuming there is no delay between RH and Air_temp
+# converge to SARIMA(1,0,0)(2,0,0)
+sarima_mod = Arima(RH, order = c(1,0,0), seasonal = list(
+  order = c(2,0,0), period = 24), xreg = Air_temp, method = 'CSS' )
+# model coefficients are
+sarima_mod
+print("confidence intervals are :")
+confint(sarima_mod)
+# diagnostics
+tsdiag(sarima_mod)
+# histogram of residuals for normality check
+hist(sarima_mod$residuals, probability = T, xlab = "Residuals",ylab = "Probability",
+     main = "Histogram of residuals", col = "gray")
+```
+
+```{r comparing the forecasts, fig.height = 3, fig.width= 6, fig.align = 'center'}
+# Forecast For model M2 
+forecast_M2 = forecast(sarima_mod, h = 96, xreg = Air_temp_test)
+# On train data
+plot(forecast_M2$fitted, type = 'l', main = "Predictions on train data (M2)")
+lines(RH, col = 'red')
+# On test data
+plot(forecast_M2$mean[1:96], type = 'l', main = "Predictions on test data (M2)")
+lines(RH_test, col = 'red')
+
+# accuracy metrics
+train_eval = regr.eval(RH, forecast_M2$fitted)
+print("The train accuracy metrics for M2 are :")
+print(train_eval)
+
+test_eval = regr.eval(RH_test, forecast_M2$mean[1:96])
+print("The test accuracy metrics for M2 are :")
+print(test_eval)
+```
+## 7. Comparing forecasts of models M1 and M2
+On the basis of accuracy metrics on test data, we select M2 (linear SARIMA with exogenous variable) as the better model, because it could generalize the test data better.
+
+## 8. Replacing missing values and rebuilding the model
+### 8.1 Replacing the missing values of RH
+Here we replace the missing values of RH by the values predicted by the model M2 (best model obtained in step 7) and rebuild the model.
+```{r}
+# Replacing the missing values of RH
+RH_replaced = fin_Data_1$HUMIDITY...
+# missing indices
+miss_indices = which(is.na(RH_replaced))
+# updating with predicted values
+for (i in miss_indices){
+  # checking if the index is in train part or forecast part
+  if (i < 1200){
+    RH_replaced[i] = forecast_M2$fitted[i]
+  }
+  else{
+    RH_replaced[i] = forecast_M2$mean[i - 1200]
+  }
+}
+```
+### 8.2 Rebuilding the model
+```{r}
+# train and test
+RH_mod_train = RH_replaced[1:1200]
+RH_mod_test = RH_replaced[1201:1296]
+```
+```{r, fig.width=6, fig.height= 2.5,fig.align="center"}
+# acf 
+acf(RH_mod_train, lag.max = 100)
+# pacf
+pacf(RH_mod_train, lag.max = 100)
+```
+
+```{r}
+# Assuming there is no delay between RH and Air_temp
+# converge to SARIMA(1,0,0)(2,0,0)
+sarima_mod1 = Arima(RH_mod_train, order = c(1,0,0), seasonal = 
+                      list(order = c(2,0,0), period = 24), xreg = Air_temp, method = 'CSS' )
+# model coefficients are
+sarima_mod1
+#AIC(sarima_mod)
+print("confidence intervals are :")
+confint(sarima_mod1)
+# diagnostics
+tsdiag(sarima_mod1)
+# histogram of residuals for normality check
+hist(sarima_mod1$residuals, probability = T, xlab = "Residuals",
+     ylab = "Probability",main = "Histogram of residuals", col = "gray")
+```
+```{r, fig.width=6, fig.height= 2.5,fig.align="center"}
+# Forecast For new model 
+forecast_best = forecast(sarima_mod1, h = 96, xreg = Air_temp_test)
+# On train data
+plot(forecast_best$fitted, type = 'l', main = "Predictions on train data of best model")
+lines(RH, col = 'red')
+# On test data
+plot(forecast_best$mean[1:96], type = 'l', main = "Predictions on test data of best model")
+lines(RH_test, col = 'red')
+
+# accuracy metrics
+train_eval = regr.eval(RH, forecast_best$fitted)
+print("The train accuracy metrics for best model are :")
+print(train_eval)
+
+test_eval = regr.eval(RH_test, forecast_best$mean[1:96])
+print("The test accuracy metrics for best model are :")
+print(test_eval)
+```
+### 8.3 Inferences
+  The model built after replacing the `NA` values with the predicted values of linear SARIMA model obtained in part `6`. It performs better than both the models obtained in part 5 and 6, (inferred from the reduction in the metrics MAE,MSE, ...). `This is because, the imputation method used in part 3, might not have considered the time-correlation`.where as the linear sarima model takes into account both time correlation and also the temperature exogenous variable.
+
+  The model didn't change that much but, it's coefficients changed slightly, and their standard errors decreased. Even the s.e of the error also reduced.
+
+
+
+
